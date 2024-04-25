@@ -1,3 +1,7 @@
-SQL/PlayersDB.db
+MemeMailMan/routing.py
+MemeMailMan/media
+MemeMailMan/start.bat
+MemeMailMan/__pycache__
 SQL/config.json
-MemeMailMan/.env
+SQL/PlayersDB.db
+.env
