@@ -5,3 +5,4 @@ MemeMailMan/__pycache__
 SQL/config.json
 SQL/PlayersDB.db
 .env
+MemeMailMan/MMM.db
