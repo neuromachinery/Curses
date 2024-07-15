@@ -12,6 +12,11 @@ from routing import ROUTING
 log_queue = Queue()
 get_queue = Queue()
 req_queue = Queue()
+
+updates_queue = Queue()
+t_upd_queue = Queue()
+d_upd_queue = Queue()
+
 def q_get(queue):
     try:return queue.get_nowait()
     except QueueEmpty:return None
@@ -115,7 +120,9 @@ class Model():
             while not EXIT_FLAG.is_set(): 
                 time.sleep(CONTROL_THREAD_TIMEOUT)
                 message = self.process_queue(log_queue)
-                if message:self.DB_log(*message)
+                if message:
+                    self.DB_log(*message)
+                    self.get_queue.put_nowait(message)
                 request = self.process_queue(req_queue)
                 if not request: continue
                 result = self.DB_list(*request)
@@ -136,7 +143,7 @@ class Model():
         except sqlite3.OperationalError as e:
             return "; ".join([str(e),table_name,*map(str,message),command[0]])
         self.DB_commit()
-        return "success"
+        return True
     def DB_count(self,table_name:str):
         return int(self.cur.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0])
     def DB_remove(self,table_name:str,id):
@@ -277,7 +284,7 @@ for i,table in enumerate(TABLES):
         continue
     content.reverse()
     if type(content[0])==tuple:
-        content = [" @ ".join(map(str,entry)) for entry in content]
+        content = [" | ".join(map(str,entry)) for entry in content]
     try:
         pages_args[i] = [table,"\n".join(content),f"{str(len(content))}/{count}/{CONTENT_LIMIT}"]
     except TypeError as e:

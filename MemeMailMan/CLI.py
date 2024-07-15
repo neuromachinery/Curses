@@ -33,6 +33,10 @@ class Page():
         return "".join(res)
     def __repr__(self):
         return self.top_row
+    def __eq__(self, __value: object) -> bool:
+        return self.top_row==__value
+    def __hash__(self) -> int:
+        return hash(self.top_row) 
     def filler(self,text) -> str:
         try:return (text if type(text)==str else text.decode("UTF-8"))+(" "*(self.dims[1]+1-len(text)))
         except UnicodeDecodeError:
@@ -54,18 +58,21 @@ class Page():
         #self.display_content=self.filler("")
         for y in range(self.pos[0],self.dims[0]+1):
             self.scr.addstr(y,self.pos[1]," "*self.dims[1])
-    def change_top(self,text):
+    def change_top(self,text:str,draw:bool=True):
         self.top_row = text
         text = text[:self.dims[1]]
-        self.scr.addstr(self.pos[0],self.pos[1],self.filler(text))
-    def change_bottom(self,text):
+        if draw: 
+            self.scr.addstr(self.pos[0],self.pos[1],self.filler(text))
+    def change_bottom(self,text:str,draw:bool=True):
         self.bottom_row = text
         text = text[:self.dims[1]]
-        self.scr.addstr(self.dims[0],self.pos[1],self.filler(text))
-    def change_content(self,content):
+        if draw: 
+            self.scr.addstr(self.dims[0],self.pos[1],self.filler(text))
+    def change_content(self,content:str,draw:bool=True):
         self.content = content
         self.display_content = self.preprocess(content)
-        self.draw()
+        if draw: 
+            self.draw()
     def scroll_content(self,up:bool):
         win = self.scr
         change = self.dims[1]
@@ -103,16 +110,16 @@ class CLIBot():
         self.status_pos = (2,2)
         self.BGch = "#"
     def run(self,pages_args):
-        self.page_lim = len(pages_args)
-        limit = int(pages_args[0][2].split("/")[2])
-        for i in range(self.page_lim):
-            self.content_numbers[i]=limit
+        for i,args in enumerate(pages_args):
+            count = int(args[2].split("/")[0])
+            self.content_numbers[i]=count
         try:curses.wrapper(self.main,pages_args)
         except KeyboardInterrupt:quit()
     def main(self,scr,pages_args):
         self.scr = scr
         self.dims = np.array((curses.LINES,curses.COLS))
         self.pages = [Page(scr,self.dims-(2,4),(3,2),True,*args) for args in pages_args]
+        self.page_lim = len(pages_args)
         scr.addstr(0,0,self.statusbar_func(self.pages).format(*self.pages))
         for x in (0,self.dims[1]-1):
             for y in range(1,self.dims[0]-1):
@@ -138,21 +145,33 @@ class CLIBot():
                 454:lambda:self.changePage(right=True),
                 261:lambda:self.changePage(right=True),
                 113:self.db_exit_f,
+                114:self.update,
+                109:self.mute,
+
+                1081:self.db_exit_f,
+                1082:self.update,
+                1100:self.mute
             }
             if(key in self.FunMap.keys()): 
-                res = self.FunMap[key]()
+                try:
+                    res = self.FunMap[key]()
+                except NotImplementedError:
+                    self.status("not implemented. Yet.")
+                    sleep(TIMEOUT)
+                    continue
                 if(res == None):
                     scr.refresh()
                     continue
                 tableData=pages_args[self.currentPage]
                 tableName = tableData[0]
-                count = int(tableData[2].split("/")[1])
                 currentCount = self.content_numbers[self.currentPage]
-                limit = int(tableData[2].split("/")[2])
-                offset = count-(currentCount+limit)
-                if (currentCount+offset>count or offset<currentCount):
-                    offset = count-currentCount
-                self.db_req_f(tableName,count,offset)
+                max_count = int(tableData[2].split("/")[1])
+                if currentCount>=max_count:continue
+                batch_size = int(tableData[2].split("/")[2])
+                offset = max_count-(currentCount+batch_size)
+                if (currentCount+offset>max_count or offset<currentCount):
+                    offset = max_count-currentCount
+                self.db_req_f(tableName,max_count,offset)
                 self.status("waiting database")
                 db_content = None
                 while True:
@@ -160,7 +179,8 @@ class CLIBot():
                     if db_content == []:
                         db_content = None
                         break
-                    if db_content == None:continue
+                    if db_content == None:
+                        continue
                     format_string = "{} @ {}" if len(db_content[0])==2 else "{}:{} ({}) @{} in {}"
                     db_content = [format_string.format(*message) for message in db_content]
                     change = len(db_content)
@@ -204,7 +224,31 @@ class CLIBot():
         #map(lambda page,mode:self.scr.chgat(0,3+(5*page)+sum([len(str(pagename)) for pagename in self.pages[:page]]),len(str(self.pages[page])),mode),((previousPage,curses.A_NORMAL),(currentPage,curses.A_STANDOUT)))
         self.scr.chgat(0,3+(5*previousPage)+sum([len(str(pagename)) for pagename in self.pages[:previousPage]]),len(str(self.pages[previousPage])),curses.A_NORMAL)
         self.scr.chgat(0,3+(5*currentPage)+sum([len(str(pagename)) for pagename in self.pages[:currentPage]]),len(str(self.pages[currentPage])),curses.A_STANDOUT)
-
+    def update(self):
+        update_screen = False
+        self.status("getting updates.")
+        while True:
+            db_content = self.db_get_f()
+            if db_content:
+                table = db_content[0]
+                try: page_index = self.pages.index(table)
+                except ValueError:continue
+                page = self.pages[page_index]
+                if not update_screen and page_index==self.currentPage:
+                    update_screen = True
+                format_string = " | ".join([str(entry) if entry else "<nothing>" for entry in db_content[1]])
+                page.change_content(f"{format_string}\n{page.content}",draw=False)
+            else:
+                break
+        if update_screen:
+            self.status("updating screen")
+            page = self.pages[self.currentPage]
+            page.clear()
+            page.draw()
+        self.status("update finished")
+        sleep(TIMEOUT)
+    def mute(self):
+        raise NotImplementedError
 if __name__ == "__main__":
     #pages = [(f"TOP {i}","",f"BOTTOM {i}") for i in range(3)]
     #for i,filename in enumerate(("lorem.txt","rus.txt","en.txt")):
