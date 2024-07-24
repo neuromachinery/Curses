@@ -6,3 +6,5 @@ SQL/config.json
 SQL/PlayersDB.db
 .env
 MemeMailMan/MMM.db
+MemeMailMan/Shared
+Project URL checker

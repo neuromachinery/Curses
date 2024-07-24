@@ -1,21 +1,22 @@
-from os import remove,path
+from os import remove,path,listdir
 from sys import argv
-from discord import File,Intents,Client
+from discord import File,Intents,Client, Interaction, app_commands,Object
 from telebot.async_telebot import AsyncTeleBot
 from telebot import ExceptionHandler
 from threading import Thread,Event
 from asyncio import run,sleep,Queue,QueueEmpty,create_task
 import time
 from dotenv import load_dotenv, dotenv_values
+from discord import app_commands
+from discord.ext import commands
+
+
+
 
 from routing import ROUTING
 log_queue = Queue()
 get_queue = Queue()
 req_queue = Queue()
-
-updates_queue = Queue()
-t_upd_queue = Queue()
-d_upd_queue = Queue()
 
 def q_get(queue):
     try:return queue.get_nowait()
@@ -30,6 +31,7 @@ telegram_queue = Queue()
 discord_queue = Queue()
 
 import CLI
+import FileManager
 import sqlite3
 
 from datetime import datetime
@@ -50,6 +52,71 @@ DISCORD_PERMISSIONS.guilds = True
 TELEGRAM_TOKEN = config["TELEGRAM_TOKEN"]
 GROUP_ID = config["TELEGRAM_GROUP"]
 
+FILES_DIRECTORY = FileManager.SharedDirectory
+LOCALE = {
+    "RU":{
+        "default":"<ошибка>",
+        "file_list":"Список всех доступных директорий: ",
+        "help":"Список команд: ",
+        "arg":"параметр",
+        "packing":"Упаковываем файлы",
+        "sending":"Отправляем файлы. Кол-во: ",
+        "discord_download_desc":"Скачать директорию используя несколько архивов",
+        "discord_list_desc":"Отображение доступных директорий",
+        "discord_download_param_desc":"Выбранная директория",
+        "file_channel_ban":"В этом канале нельзя срать файлами",
+        "file_not_found":"Директория не найдена",
+        "":"",
+        "":"",
+        },
+    "EN":{
+        "default":"<error>",
+        "file_list":"List of accessable directories: ",
+        "help":"List of commands: ",
+        "arg":"argument",
+        "packing":"Packing files",
+        "sending":"Sending files. File count: ",
+        "discord_download_desc":"Download directory using zip volumes",
+        "discord_download_param_desc":"Directory of choice",
+        "discord_list_desc":"List of downloadable directories",
+        "file_channel_ban":"File-shitting is prohibited for this channel",
+        "file_not_found":"Directory not found",
+        "":"",
+        "":"",
+        }
+    }
+locale = lambda arg:LOCALE[DEFAULT_LOCALE].get(arg,LOCALE[DEFAULT_LOCALE]["default"])
+DEFAULT_LOCALE = "RU"
+FILES_DISCORD_BLACKLIST = [
+    936569889999699988,
+    922499261319499867,
+    1072222440295497748,
+    808073771532812301,
+    812618354732695574,
+    1233431876870606972,
+    867905016223105034,
+    812614680409276438,
+    867803368071495750,
+    868491996052983818,
+    808077556070219806,
+]
+FILES_TELEGRAM_BLACKLIST = [
+    1,
+    32,
+    30,
+    28,
+    418,
+    124,
+    977,
+    34,
+]
+T_COMMANDS = [
+    "download <arg>",
+    "list"
+]
+
+DISCORD_FILE_LIMIT=int(24.99*1024*1024)
+TELEGRAM_FILE_LIMIT=int(49.9*1024*1024)
 
 MISCELLANIOUS_LOGS_TABLE = "LogsMisc"
 TELEGRAM_LOGS_TABLE = "LogsTelegram"
@@ -78,6 +145,8 @@ def readable_string(string:str):
     return all(ord(char) < 128 or (1040 <= ord(char) <= 1103) for char in string)
 def readable_iterable(strings,default:str):
     return next((item for item in strings if readable_string(item)), default)
+def buffer_clear():
+    [remove(file) for file in listdir(FileManager.Buffer)]
 def now():
     return datetime.now().strftime("[%d.%m.%Y@%H:%M:%S]")
 class Channel():
@@ -183,27 +252,56 @@ class Telegram():
     async def bot_thread(self):
         async def queue_monitor(self):
             while not EXIT_FLAG.is_set():
-                if(not self.discord_queue.empty()):
-                    text,Path,channel = await self.discord_queue.get()
-                    if(not Path):
-                        await self.bot.send_message(GROUP_ID,text=text,message_thread_id=channel)
-                        self.discord_queue.task_done()
-                        continue
-                    ext = Path.split('.')[-1].lower()
-                    try:
-                        with open(Path,"br") as file:
-                            if(ext in self.MEDIA_METHODS):
-                                await self.MEDIA_METHODS[ext](GROUP_ID,file,message_thread_id=channel,caption=text)
-                            else:
-                                await self.bot.send_document(GROUP_ID,file,message_thread_id=channel,caption=text)
-                        remove(Path)
-                    except Exception as E:
-                        LOGGER(MISCELLANIOUS_LOGS_TABLE,(str(E),now()))
-                    finally:self.discord_queue.task_done()
-                await sleep(1)
+                if(self.discord_queue.empty()):
+                    await sleep(1)
+                    continue
+                text,Path,channel = await self.discord_queue.get()
+                if(not Path):
+                    await self.bot.send_message(GROUP_ID,text=text,message_thread_id=channel)
+                    self.discord_queue.task_done()
+                    continue
+                ext = Path.split('.')[-1].lower()
+                try:
+                    with open(Path,"br") as file:
+                        await self.MEDIA_METHODS.get(ext,self.bot.send_document)(GROUP_ID,file,message_thread_id=channel,caption=text)
+                    remove(Path)
+                except Exception as E:
+                    LOGGER(MISCELLANIOUS_LOGS_TABLE,(str(E),now()))
+                finally:self.discord_queue.task_done()
+        @self.bot.message_handler(commands=["start"])
+        async def start(message):
+            cmds = ";\n".join(["/"+cmd.replace('<arg>',locale('arg')) for cmd in T_COMMANDS])
+            await self.bot.send_message(message.chat.id,f"{locale('help')}\n{cmds}")
+        @self.bot.message_handler(commands=["download"])
+        async def file_download(message):
+            time = now()
+            ret_id = message.chat.id
+            if ret_id in FILES_TELEGRAM_BLACKLIST:
+                return
+            dirname = message.text.removeprefix("/download").strip()
+            if not dirname in FileManager.dirList(FILES_DIRECTORY):
+                return
+            bot_message = await self.bot.send_message(ret_id,locale("packing"),reply_to_message_id=message.message_id)
+            zips = FileManager.filePack(dirname,TELEGRAM_FILE_LIMIT)
+            if type(zips)==str:
+                LOGGER(MISCELLANIOUS_LOGS_TABLE,(zips,time))
+                buffer_clear()
+                return
+            zips_amount = len(zips)
+            await self.bot.edit_message_text(f"{locale('sending')}{zips_amount}",ret_id,bot_message.message_id)
+            for i,zipfile in enumerate(zips,start=1):
+                with open(zipfile,"br") as file:
+                    await self.bot.send_document(ret_id,file,reply_to_message_id=message.message_id,caption=f"{i}/{zips_amount}")
+                remove(zipfile)
+        @self.bot.message_handler(commands=["files","list"])
+        async def file_list(message):
+            ret_id = message.chat.id
+            files = ";\n".join(FileManager.dirList(FILES_DIRECTORY))
+            text = f'{locale("file_list")}\n{files}'
+            await self.bot.send_message(ret_id,text)
         @self.bot.message_handler(content_types=["text","sticker","photo","video","gif"])
-        async def _(message):
-            time = datetime.fromtimestamp(message.date).strftime("[%d.%m.%Y@%H:%M:%S]")
+        async def messages(message):
+            time = now()
             if(not (channel:=message.message_thread_id) in ROUTING):
                 LOGGER(MISCELLANIOUS_LOGS_TABLE,(f"{channel} не смотрим",time))
                 return
@@ -229,13 +327,15 @@ class Telegram():
         await self.bot.polling() 
     def main(self): 
         while not EXIT_FLAG.is_set():
-            try:run(self.bot_thread())
+            try:
+                run(self.bot_thread())
             except Exception as E:
                 LOGGER(MISCELLANIOUS_LOGS_TABLE,(str(E),now()))
                 EXIT_FLAG.set()
 class DiscordBot(Client):
     def __init__(self, telegram_queue:Queue, discord_queue:Queue, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.tree = app_commands.CommandTree(self)
         self.telegram_queue = telegram_queue
         self.discord_queue = discord_queue
     async def send_file(self, text, file_path, channel):
@@ -245,6 +345,7 @@ class DiscordBot(Client):
         if file_path: 
             await channel.send(file=File(file_path))
             remove(file_path)
+    
     async def on_message(self,message): 
         if (message.author == self.user):
             return
@@ -264,14 +365,55 @@ class DiscordBot(Client):
         await self.discord_queue.put((f"{user}:{message.content} {time}","",ROUTING[ROUTING.index(message.channel.id)].ID_to))
     async def check_queue_and_send(self):
         while not EXIT_FLAG.is_set():
-            if not self.telegram_queue.empty():
-                await self.send_file(*await self.telegram_queue.get())
-                self.telegram_queue.task_done()
-            await sleep(1)
+            if self.telegram_queue.empty():
+                await sleep(1)
+                continue
+            await self.send_file(*await self.telegram_queue.get())
+            self.telegram_queue.task_done()
 bot = DiscordBot(telegram_queue,discord_queue,intents=DISCORD_PERMISSIONS)
+@bot.tree.command(
+    name="list",
+    description=locale("discord_list_desc"),
+    guild=Object(id=DISCORD_SERVER)
+)
+async def list_cmd(interaction):
+    files = ";\n".join(FileManager.dirList(FILES_DIRECTORY))
+    text = f'{locale("file_list")}\n{files}'
+    await interaction.response.send_message(text)
+@bot.tree.command(
+    name="download",
+    description=locale("discord_download_desc"),
+    guild=Object(id=DISCORD_SERVER)
+)
+async def download_cmd(interaction,directory:str):
+    time = now()
+    ret_id = interaction.channel_id
+    if ret_id in FILES_DISCORD_BLACKLIST:
+        text = locale("file_channel_ban")
+        await interaction.response.send_message(text)
+        return
+    dirname = directory
+    if not dirname in FileManager.dirList(FILES_DIRECTORY):
+        text = locale("file_not_found")
+        await interaction.response.send_message(text)
+        return
+    await interaction.response.send_message(locale("packing"))
+    zips = FileManager.filePack(dirname,DISCORD_FILE_LIMIT)
+    if type(zips)==str:
+        await interaction.followup.send(zips)
+        LOGGER(MISCELLANIOUS_LOGS_TABLE,(zips,time))
+        buffer_clear()
+        return
+    zips_amount = len(zips)
+    await interaction.followup.send(f"{locale('sending')}{zips_amount}")
+    for i,zipfile in enumerate(zips,start=1):
+        with open(zipfile,"br") as file:
+            await interaction.followup.send(f"{i}/{zips_amount}",file=File(file))
+        remove(zipfile)
 @bot.event
 async def on_ready():
-    task = bot.loop.create_task(bot.check_queue_and_send())
+    _ = bot.loop.create_task(bot.check_queue_and_send())
+    await bot.tree.sync(guild=Object(id=DISCORD_SERVER))
     CLI_START_FLAG.set()
 model = Model("MMM.db",log_queue,get_queue,req_queue)
 ROUTING = [Channel(*route) for route in model.DB_list("Routing")]
@@ -303,4 +445,5 @@ Thread(target=cliBot.run,args=[pages_args],daemon=True,name="CLI").start()
 try:model.control_thread()
 except KeyboardInterrupt:
     EXIT_FLAG.set()
+    buffer_clear()
     quit()
