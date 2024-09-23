@@ -3,6 +3,7 @@ from sys import argv
 from discord import File,Intents,Client, Interaction, app_commands,Object
 from telebot.async_telebot import AsyncTeleBot
 from telebot import ExceptionHandler
+from telebot.apihelper import ApiTelegramException
 from threading import Thread,Event
 from asyncio import run,sleep,Queue,QueueEmpty,create_task
 import time
@@ -66,6 +67,7 @@ LOCALE = {
         "discord_download_param_desc":"Выбранная директория",
         "file_channel_ban":"В этом канале нельзя срать файлами",
         "file_not_found":"Директория не найдена",
+        "me_desc":"Ваш ID: ",
         "":"",
         "":"",
         },
@@ -81,6 +83,7 @@ LOCALE = {
         "discord_list_desc":"List of downloadable directories",
         "file_channel_ban":"File-shitting is prohibited for this channel",
         "file_not_found":"Directory not found",
+        "me_desc":"Your ID: ",
         "":"",
         "":"",
         }
@@ -241,13 +244,13 @@ class Telegram():
         self.telegram_queue = telegram_queue
         self.discord_queue = discord_queue
         self.MEDIA_METHODS = {
-            'jpg': self.bot.send_photo,
-            'jpeg':self.bot.send_photo,
-            'png': self.bot.send_photo,
-            'gif': self.bot.send_animation,
-            'mp4': self.bot.send_video,
-            'mov': self.bot.send_video,
-            'avi': self.bot.send_video
+            'jpg': (self.bot.send_photo,"photo"),
+            'jpeg':(self.bot.send_photo,"photo"),
+            'png': (self.bot.send_photo,"photo"),
+            'gif': (self.bot.send_animation,""),
+            'mp4': (self.bot.send_video,),
+            'mov': (self.bot.send_video,),
+            'avi': (self.bot.send_video,)
         }
     async def bot_thread(self):
         async def queue_monitor(self):
@@ -256,21 +259,27 @@ class Telegram():
                     await sleep(1)
                     continue
                 text,Path,channel = await self.discord_queue.get()
+                keyword_args = {"chat_id":GROUP_ID,"message_thread_id":channel} if type(channel)==int else {"chat_id":channel}
                 if(not Path):
-                    await self.bot.send_message(GROUP_ID,text=text,message_thread_id=channel)
+                    await self.bot.send_message(**keyword_args,text=text)
                     self.discord_queue.task_done()
                     continue
                 ext = Path.split('.')[-1].lower()
                 try:
                     with open(Path,"br") as file:
-                        await self.MEDIA_METHODS.get(ext,self.bot.send_document)(GROUP_ID,file,message_thread_id=channel,caption=text)
+                        method,argument_name = self.MEDIA_METHODS.get(ext,self.bot.send_document)
+                        keyword_args.update({argument_name:file})
+                        await method(**keyword_args,caption=text)
                     remove(Path)
                 except Exception as E:
                     LOGGER(MISCELLANIOUS_LOGS_TABLE,(str(E),now()))
                 finally:self.discord_queue.task_done()
+        @self.bot.message_handler(commands=["me"])
+        async def me(message):
+            await self.bot.send_message(message.chat.id,f"{LOCALE[DEFAULT_LOCALE]['me_desc']}{message.chat.id}")
         @self.bot.message_handler(commands=["start"])
         async def start(message):
-            cmds = ";\n".join(["/"+cmd.replace('<arg>',locale('arg')) for cmd in T_COMMANDS])
+            cmds = "\n".join(["/"+cmd.replace('<arg>',locale('arg')) for cmd in T_COMMANDS])
             await self.bot.send_message(message.chat.id,f"{locale('help')}\n{cmds}")
         @self.bot.message_handler(commands=["download"])
         async def file_download(message):
@@ -370,6 +379,7 @@ class DiscordBot(Client):
                 continue
             await self.send_file(*await self.telegram_queue.get())
             self.telegram_queue.task_done()
+        self.close()
 bot = DiscordBot(telegram_queue,discord_queue,intents=DISCORD_PERMISSIONS)
 @bot.tree.command(
     name="list",
@@ -377,7 +387,7 @@ bot = DiscordBot(telegram_queue,discord_queue,intents=DISCORD_PERMISSIONS)
     guild=Object(id=DISCORD_SERVER)
 )
 async def list_cmd(interaction):
-    files = ";\n".join(FileManager.dirList(FILES_DIRECTORY))
+    files = "\n".join(FileManager.dirList(FILES_DIRECTORY))
     text = f'{locale("file_list")}\n{files}'
     await interaction.response.send_message(text)
 @bot.tree.command(
@@ -408,7 +418,8 @@ async def download_cmd(interaction,directory:str):
     await interaction.followup.send(f"{locale('sending')}{zips_amount}")
     for i,zipfile in enumerate(zips,start=1):
         with open(zipfile,"br") as file:
-            await interaction.followup.send(f"{i}/{zips_amount}",file=File(file))
+            #await interaction.followup.send(f"{i}/{zips_amount}",file=File(file))
+            await interaction.followup.send(file=File(file))
         remove(zipfile)
 @bot.event
 async def on_ready():
@@ -445,5 +456,6 @@ Thread(target=cliBot.run,args=[pages_args],daemon=True,name="CLI").start()
 try:model.control_thread()
 except KeyboardInterrupt:
     EXIT_FLAG.set()
+    bot.close()
     buffer_clear()
     quit()
