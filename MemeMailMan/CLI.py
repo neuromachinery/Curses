@@ -1,5 +1,5 @@
 import curses
-import numpy as np
+from numpy import array
 from time import sleep
 TIMEOUT = 1
 class Page():
@@ -10,7 +10,7 @@ class Page():
         self.utf = utf
         self.content = content
         self.display_content = self.preprocess(content)
-        self.content_positions = np.array((0,0))
+        self.content_positions = array((0,0))
         self.top_row = top_row[:self.dims[1]].replace("\n"," ")
         self.bottom_row = bottom_row[:self.dims[1]].replace("\n"," ")
     def preprocess(self,text):
@@ -79,7 +79,8 @@ class Page():
         char_lim = self.dims[1]*2 if self.utf else self.dims[1]
         if up:
             if(self.content_positions[1]>=len(self.display_content)):
-                return True
+                #return True
+                return
             for row in range(self.pos[0]+1,self.dims[0]-1):
                 win.move(row,self.pos[1])
                 line = win.instr(row+1,self.pos[1],char_lim)
@@ -100,10 +101,13 @@ class Page():
         win.addstr(self.filler(content))
         self.content_positions = self.content_positions + change
         #if np.any(self.content_positions<0):self.content_positions = np.array((0,self.dims[1]+self.dims[0]+3))
+
         win.move(*self.pos)
 class CLIBot():
     def __init__(self,db_req_f,db_get_f,db_exit_f):
-        self.db_req_f,self.db_get_f,self.db_exit_f = db_req_f,db_get_f,db_exit_f
+        self.name = "CLI"
+        self.db_req_f,self.db_get_f = db_req_f,db_get_f
+        self.db_exit_f = db_exit_f
         self.statusbar_func = lambda iter:"| [{}] " * (len(iter)) + " |"
         self.content_numbers = {}
         self.currentPage = 0
@@ -117,7 +121,7 @@ class CLIBot():
         except KeyboardInterrupt:quit()
     def main(self,scr,pages_args):
         self.scr = scr
-        self.dims = np.array((curses.LINES,curses.COLS))
+        self.dims = array((curses.LINES,curses.COLS))
         self.pages = [Page(scr,self.dims-(2,4),(3,2),True,*args) for args in pages_args]
         self.page_lim = len(pages_args)
         scr.addstr(0,0,self.statusbar_func(self.pages).format(*self.pages))
@@ -171,7 +175,7 @@ class CLIBot():
                 offset = max_count-(currentCount+batch_size)
                 if (currentCount+offset>max_count or offset<currentCount):
                     offset = max_count-currentCount
-                self.db_req_f(tableName,max_count,offset)
+                self.db_req_f(self.name,tableName,max_count,offset)
                 self.status("waiting database")
                 db_content = None
                 while True:
