@@ -30,7 +30,7 @@ import CLI
 import FileManager
 from DBconnect import SocketTransiever
 
-DB_Transiever = SocketTransiever(HOSTS["DB"][1],HOSTS["DB"][0])
+DB_Transiever = SocketTransiever(target=HOSTS["MMM"])
 DB_Transiever.connect()
 LOGGER = lambda *args:log_queue.put_nowait(args)
 getData = get_queue_f
