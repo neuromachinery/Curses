@@ -6,19 +6,28 @@ from telebot import ExceptionHandler
 from telebot.apihelper import ApiTelegramException
 from threading import Thread,Event
 from asyncio import run,sleep,Queue,QueueEmpty,create_task
-import time
+from traceback import format_exc
 from dotenv import load_dotenv, dotenv_values
 from discord import app_commands
 from discord.ext import commands
-
+from socketio import AsyncClient,exceptions
 
 CLI_START_FLAG = Event()
 EXIT_FLAG = Event()
 exitSignal = EXIT_FLAG.set
 
 PROCESS_DELAY = 0.5
+HOST = "127.0.0.1"
+MMM_PORT = 54323
+DB_PORT = 54321
+SITE_PORT = 54322 
+ADDRESS_DICT = {
+    "DB":(HOST,DB_PORT),
+    "MMM":(HOST,MMM_PORT),
+    "SITE":(HOST,SITE_PORT)
+}
 
-from routing import ROUTING,HOSTS
+from routing import ROUTING
 log_queue = Queue()
 get_queue = Queue()
 req_queue = Queue()
@@ -26,42 +35,28 @@ def get_queue_f():
     try:return get_queue.get_nowait()
     except QueueEmpty:return None
 
-import CLI
 import FileManager
 from DBconnect import SocketTransiever
 
-DB_Transiever = SocketTransiever(target=HOSTS["MMM"])
-DB_Transiever.connect()
-LOGGER = lambda *args:log_queue.put_nowait(args)
-getData = get_queue_f
-reqData = lambda *args:req_queue.put_nowait(args)
-def process_queues():
-    while not EXIT_FLAG.is_set():
-        run(sleep(PROCESS_DELAY))
-        try:
-            data = log_queue.get_nowait()
-            print(data)
-            DB_Transiever.send_message(DB_Transiever.target_sock,data[0],"LOG",data[1:])
-        except QueueEmpty:pass
-
-        try:
-            data = req_queue.get_nowait()
-            print(data)
-            DB_Transiever.send_message(DB_Transiever.target_sock,data[0],"LST",data[1:])
-            get_queue.put_nowait(DB_Transiever.receive_message(DB_Transiever.target_sock))
-        except QueueEmpty:pass
+Transiever = SocketTransiever()
+LOGGER = lambda *args:Transiever.send_message(sock=ADDRESS_DICT["DB"],sender_name=args[0],message_type="LOG",message=args[1:])
+#getData = get_queue_f
+#reqData = lambda *args:req_queue.put_nowait(args)
 
 
 telegram_queue = Queue()
 discord_queue = Queue()
-
+site_queue = Queue()
+queues = {telegram_queue,site_queue}
+#queues = {telegram_queue,discord_queue,site_queue}
 from datetime import datetime
 
 load_dotenv()
 config = dotenv_values(".env")
 
-CWD = path.dirname(argv[0])
-
+#CWD = path.dirname(argv[0])
+CWD = path.dirname(path.realpath(__file__))
+SITE_URL = config["SITE_URL"]
 DISCORD_TOKEN = config["DISCORD_TOKEN"]
 DISCORD_SERVER = int(config["DISCORD_SERVER"])
 DISCORD_PERMISSIONS = Intents()
@@ -74,6 +69,7 @@ TELEGRAM_TOKEN = config["TELEGRAM_TOKEN"]
 GROUP_ID = config["TELEGRAM_GROUP"]
 
 FILES_DIRECTORY = FileManager.SharedDirectory
+MEDIA_PATH = path.join(CWD,"media")
 LOCALE = {
     "RU":{
         "default":"<ошибка>",
@@ -162,14 +158,14 @@ def now():
 
 class exception_handler(ExceptionHandler):
     def handle(self,exception,*args,**kwargs):
-        LOGGER("Main",MISCELLANIOUS_LOGS_TABLE,(str(exception)+";".join(map(str,args)),now()))
+        LOGGER("MMM",MISCELLANIOUS_LOGS_TABLE,(str(exception)+";".join(map(str,args)),now()))
         return True
 class Telegram():
-    def __init__(self,telegram_queue:Queue, discord_queue:Queue,exception_handler:ExceptionHandler) -> None:
+    def __init__(self,telegram_queue:Queue,exception_handler:ExceptionHandler) -> None:
         self.name = "Telegram"
         self.bot = AsyncTeleBot(TELEGRAM_TOKEN,exception_handler=exception_handler)
-        self.telegram_queue = telegram_queue
-        self.discord_queue = discord_queue
+        self.queue = telegram_queue
+        self.subscribers = queues.difference({self.queue})
         self.MEDIA_METHODS = {
             'jpg': (self.bot.send_photo,"photo"),
             'jpeg':(self.bot.send_photo,"photo"),
@@ -180,16 +176,19 @@ class Telegram():
             'avi': (self.bot.send_video,)
         }
     async def bot_thread(self):
-        async def queue_monitor(self):
+        async def queue_monitor(self:Telegram):
             while not EXIT_FLAG.is_set():
-                if(self.discord_queue.empty()):
+                if(self.queue.empty()):
                     await sleep(1)
                     continue
-                text,Path,channel = await self.discord_queue.get()
+                message,Path,channel = await self.queue.get()
+                channel = ROUTING[ROUTING.index(channel)].ID_to
+                user,text,msg_time = message
+                text = f"{user} {msg_time}: \n  {text}"
                 keyword_args = {"chat_id":GROUP_ID,"message_thread_id":channel} if type(channel)==int else {"chat_id":channel}
                 if(not Path):
                     await self.bot.send_message(**keyword_args,text=text)
-                    self.discord_queue.task_done()
+                    self.queue.task_done()
                     continue
                 ext = Path.split('.')[-1].lower()
                 try:
@@ -200,7 +199,7 @@ class Telegram():
                     remove(Path)
                 except Exception as E:
                     LOGGER(self.name,MISCELLANIOUS_LOGS_TABLE,(str(E),now()))
-                finally:self.discord_queue.task_done()
+                finally:self.queue.task_done()
         @self.bot.message_handler(commands=["me"])
         async def me(message):
             await self.bot.send_message(message.chat.id,f"{LOCALE[DEFAULT_LOCALE]['me_desc']}{message.chat.id}")
@@ -235,30 +234,38 @@ class Telegram():
             files = ";\n".join(FileManager.dirList(FILES_DIRECTORY))
             text = f'{locale("file_list")}\n{files}'
             await self.bot.send_message(ret_id,text)
+        @self.bot.message_handler(commands=["test"])
+        async def test(message):
+            try:
+                request = ((message.from_user.username,message.text,now()),None,30)
+                [await queue.put(request) for queue in self.subscribers]
+            except Exception as E:
+                LOGGER(self.name,MISCELLANIOUS_LOGS_TABLE,(str(E),now()))
         @self.bot.message_handler(content_types=["text","sticker","photo","video","gif"])
         async def messages(message):
             time = now()
             if(not (channel:=message.message_thread_id) in ROUTING):
                 LOGGER(self.name,MISCELLANIOUS_LOGS_TABLE,(f"{channel} не смотрим",time))
                 return
-            channel = ROUTING[ROUTING.index(channel)].ID_to
             text = message.text if message.text else message.caption
             text = "" if not text else text
             user = message.from_user
             user = readable_iterable((user.full_name,user.first_name,user.last_name,user.username),user.id)
             if(not (message.photo or message.video or message.sticker)):
                 LOGGER(self.name,TELEGRAM_LOGS_TABLE,(user,message.text,"",time,message.message_thread_id))
-                await self.telegram_queue.put((f"{user}:{text}\n{time}",None,channel))
+                request = ((user,text,time),None,channel)
+                [await queue.put(request) for queue in self.subscribers]
                 return
             ext = "png" if message.photo or (message.sticker and not message.sticker.is_video) else "mp4"
             media = next((var for var in (message.photo,message.video,message.sticker) if var),None) # define media by what there is in the message.
             media = media[-1] if isinstance(media,list) else media # if it's message.photo
             LOGGER(self.name,TELEGRAM_LOGS_TABLE,(user,text,media.file_unique_id,time,message.message_thread_id))
-            Path = path.join(CWD,"media",f"{media.file_unique_id}.{ext}")
+            Path = path.join(MEDIA_PATH,f"{media.file_unique_id}.{ext}")
             with open(Path,"wb") as pic:
                 file = await self.bot.get_file(media.file_id)
                 pic.write(await self.bot.download_file(file.file_path))
-            await self.telegram_queue.put((f"{user}:{text}\n{time}",Path,channel))
+            request = ((user,text+f" [{media.file_unique_id}.{ext}]",time),Path,channel)
+            [await queue.put(request) for queue in self.subscribers]
         _ = create_task(queue_monitor(self))
         await self.bot.polling() 
     def main(self): 
@@ -268,13 +275,74 @@ class Telegram():
             except Exception as E:
                 LOGGER(MISCELLANIOUS_LOGS_TABLE,(str(E),now()))
                 EXIT_FLAG.set()
+class Site():
+    def __init__(self,site_queue:Queue,*args,**kwargs):
+        self.name = "MMM_SITE"
+        self.server_url = SITE_URL
+        self.queue = site_queue
+        self.subscribers = queues.difference({self.queue})
+        self.sio = AsyncClient()
+
+        # Регистрация обработчиков событий
+        self.sio.on('connect', self.on_connect)
+        self.sio.on('disconnect', self.on_disconnect)
+        self.sio.on('receive_message', self.on_message)
+
+    async def connect(self):
+        await self.sio.connect(self.server_url)
+    async def disconnect(self):
+        await self.sio.disconnect()
+    async def send_message(self, message):
+        await self.sio.emit('send_message', message)
+
+    def on_connect(self):
+        print('Server connected')
+
+    def on_disconnect(self):
+        print("Server disconnected")
+
+    def on_message(self, data):
+        if "external" in data and data["external"]:
+            return
+        request = ((data["name"],data["message"],data["time"]),data["unique_id"],data["channel"])
+        [queue.put_nowait(request) for queue in self.subscribers]
+    async def process_queue(self):
+        while not EXIT_FLAG.is_set():
+            try:
+                await self.connect()
+                while not EXIT_FLAG.is_set():
+                    if(self.queue.empty()):
+                        await sleep(0.5)
+                        continue
+                    thing = await self.queue.get()
+                    message,path,channel = thing
+                    user,text,time = message
+                    if not channel in ROUTING or ROUTING[::-1][ROUTING.index(channel)].ID_to != -1:
+                        continue
+                    await self.send_message({"name":user,"time":time,"message":text,"unique_id":path,"channel":channel,"external":True})
+                    self.queue.task_done()
+            except exceptions.ConnectionError:
+                pass
+            except Exception:
+                E = format_exc()
+                LOGGER(self.name,MISCELLANIOUS_LOGS_TABLE,(E,now()))
+                print(E)
+            finally:
+                await self.disconnect()
+    
+    def start(self):
+        try:
+            run(self.process_queue())
+        except KeyboardInterrupt:quit()
+
+
 class DiscordBot(Client):
-    def __init__(self, telegram_queue:Queue, discord_queue:Queue, *args, **kwargs):
+    def __init__(self, discord_queue:Queue, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.name = "Discord"
         self.tree = app_commands.CommandTree(self)
-        self.telegram_queue = telegram_queue
-        self.discord_queue = discord_queue
+        self.queue = discord_queue
+        self.subscribers = queues.difference({self.queue})
     async def send_file(self, text, file_path, channel):
         channel = self.get_channel(channel)
         if not channel:return
@@ -294,21 +362,26 @@ class DiscordBot(Client):
         user = message.author
         user = readable_iterable((user.display_name,user.name,user.global_name),user.id)
         for attachment in message.attachments:
-            file_path = path.join(CWD,"media",attachment.filename)
+            file_path = path.join(MEDIA_PATH,attachment.filename)
             await attachment.save(file_path)
             LOGGER(self.name,DISCORD_LOGS_TABLE,(user,"",attachment.filename,time,channel))
-            await self.discord_queue.put((f"{user}:{attachment.filename}",file_path,ROUTING[ROUTING.index(message.channel.id)].ID_to))
+            request = ((user,attachment.filename,time),file_path,channel)
+            [await queue.put(request) for queue in self.subscribers]
         LOGGER(self.name,DISCORD_LOGS_TABLE,(user,message.content,"",time,channel))
-        await self.discord_queue.put((f"{user}:{message.content} {time}","",ROUTING[ROUTING.index(message.channel.id)].ID_to))
+        request = ((user,message.content,time),None,channel)
+        [await queue.put(request) for queue in self.subscribers]
     async def check_queue_and_send(self):
         while not EXIT_FLAG.is_set():
-            if self.telegram_queue.empty():
+            if self.queue.empty():
                 await sleep(1)
                 continue
-            await self.send_file(*await self.telegram_queue.get())
-            self.telegram_queue.task_done()
+            message,path,channel = await self.queue.get()
+            user,text,msg_time = message
+            channel = ROUTING[ROUTING.index(channel)].ID_to
+            await self.send_file(f"{user} {msg_time}: \n  {text}",path,channel)
+            self.queue.task_done()
         self.close()
-bot = DiscordBot(telegram_queue,discord_queue,intents=DISCORD_PERMISSIONS)
+bot = DiscordBot(discord_queue,intents=DISCORD_PERMISSIONS)
 @bot.tree.command(
     name="list",
     description=locale("discord_list_desc"),
@@ -354,37 +427,10 @@ async def on_ready():
     _ = bot.loop.create_task(bot.check_queue_and_send())
     await bot.tree.sync(guild=Object(id=DISCORD_SERVER))
     CLI_START_FLAG.set()
-def startCLI():
-    cliBot = CLI.CLIBot(reqData,getData,exitSignal)
-    pages_args = []
-    table_counts = []
-    for i,table in enumerate(TABLES):
-        DB_Transiever.send_message(DB_Transiever.target_sock,"Main","CNT",(table,))
-        table_counts.append(DB_Transiever.receive_message(DB_Transiever.target_sock)["message"])
-        pages_args.append((table,"",f"0/{table_counts[i]}/{CONTENT_LIMIT}"))
-    for i,table in enumerate(TABLES):
-        count = table_counts[i]
-        DB_Transiever.send_message(DB_Transiever.target_sock,"Main","LST",(table,count,count-CONTENT_LIMIT))
-        content = DB_Transiever.receive_message(DB_Transiever.target_sock)["message"]
-        if not content:
-            pages_args[i] = (table,"No content",pages_args[i][2])
-            continue
-        content.reverse()
-        if type(content[0])==tuple:
-            content = [" | ".join(map(str,entry)) for entry in content]
-        try:
-            pages_args[i] = [table,"\n".join(content),f"{str(len(content))}/{count}/{CONTENT_LIMIT}"]
-        except TypeError as e:
-            print(str(e))
-            print(content)
-    CLI_START_FLAG.wait()
-    Thread(target=cliBot.run,args=[pages_args],daemon=True,name="CLI").start()
-
-Thread(target=Telegram(telegram_queue,discord_queue,exception_handler()).main,daemon=True,name="TELEGRAM").start() 
-Thread(target=bot.run,args=[DISCORD_TOKEN],kwargs={"log_handler":None},daemon=True,name="DISCORD").start()
-#startCLI()
+Thread(target=Telegram(telegram_queue,exception_handler()).main,daemon=True,name="TELEGRAM").start() 
+#Thread(target=bot.run,args=[DISCORD_TOKEN],kwargs={"log_handler":None},daemon=True,name="DISCORD").start()
 print("started")
-try:process_queues()
+try:Site(site_queue).start()
 except KeyboardInterrupt:
     EXIT_FLAG.set()
     run(bot.close())
